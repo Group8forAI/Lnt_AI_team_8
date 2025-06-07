@@ -1,78 +1,91 @@
-#include <DHT.h>
+/************************************************************
+  ESP32  ▶ ThingSpeak – Fish-Hatchery Demo
+  Sensors:
+    • DHT22  (Temp & RH)    -> GPIO 15
+    • Pot-1  (Soil Moisture)-> GPIO 34 (ADC1_CH6)
+    • Pot-2  (Water Purity) -> GPIO 35 (ADC1_CH7)
+  ThingSpeak fields:
+    field1 = Temperature  (°C)
+    field2 = Humidity     (%)
+    field3 = Soil Moisture (raw 0-4095)
+    field4 = Water Purity  (raw 0-4095)
+************************************************************/
 
-#define DHTPIN 14        // DHT11 connected to GPIO14
-#define DHTTYPE DHT11
+#include <WiFi.h>
+#include <HTTPClient.h>
+#include "DHTesp.h"
 
-#define SOIL_PIN 34      // Soil moisture sensor (analog)
-#define WATER_PIN 35     // Potentiometer simulating water purity
-#define LED_PIN 12       // LED indicator
+// ─── USER SETTINGS ────────────────────────────────────────
+const char* ssid     = "YOUR_WIFI_SSID";        // e.g. "Wokwi-GUEST"
+const char* password = "YOUR_WIFI_PASSWORD";    // blank for open network
+const char* apiKey   = "YOUR_WRITE_API_KEY";    // ThingSpeak WRITE key
+// ThingSpeak update URL (HTTP, port 80)
+const char* server   = "http://api.thingspeak.com/update";
 
-DHT dht(DHTPIN, DHTTYPE);
+// ─── PIN DEFINITIONS ──────────────────────────────────────
+constexpr uint8_t DHT_PIN           = 15;
+constexpr uint8_t SOIL_PIN          = 34;   // ADC1
+constexpr uint8_t WATER_PURITY_PIN  = 35;   // ADC1
 
+// ─── OBJECTS ──────────────────────────────────────────────
+DHTesp dht;
+
+// ─── SETUP ────────────────────────────────────────────────
 void setup() {
   Serial.begin(115200);
-  dht.begin();
+  delay(300);
 
-  pinMode(LED_PIN, OUTPUT);
-  digitalWrite(LED_PIN, LOW);
+  // Initialise DHT22
+  dht.setup(DHT_PIN, DHTesp::DHT22);
+
+  // Wi-Fi
+  Serial.print("Connecting to WiFi: ");
+  Serial.println(ssid);
+  WiFi.begin(ssid, password);
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print('.');
+  }
+  Serial.println("\nWiFi connected. IP: " + WiFi.localIP().toString());
+
+  // Configure ADC pins (optional but explicit)
+  pinMode(SOIL_PIN,  INPUT);
+  pinMode(WATER_PURITY_PIN, INPUT);
 }
 
+// ─── MAIN LOOP ────────────────────────────────────────────
 void loop() {
-  // Read DHT11 values
-  float temp = dht.readTemperature();
-  float hum = dht.readHumidity();
+  // ── Read sensors ───────────────────────────────────────
+  TempAndHumidity dhtData = dht.getTempAndHumidity();
+  int soilRaw   = analogRead(SOIL_PIN);          // 0–4095
+  int purityRaw = analogRead(WATER_PURITY_PIN);  // 0–4095
 
-  // Read soil moisture and water purity
-  int soil = analogRead(SOIL_PIN);
-  int water = analogRead(WATER_PIN);
+  // Log to Serial Monitor
+  Serial.printf("Temp: %.1f °C | Hum: %.1f %% | Soil: %d | Purity: %d\n",
+                dhtData.temperature, dhtData.humidity, soilRaw, purityRaw);
 
-  // Display readings
-  Serial.println("-------- Sensor Readings --------");
-  Serial.print("Temperature: ");
-  Serial.print(temp);
-  Serial.println(" °C");
+  // ── Send to ThingSpeak ─────────────────────────────────
+  if (WiFi.status() == WL_CONNECTED) {
+    HTTPClient http;
+    String url = String(server) +
+                 "?api_key=" + apiKey +
+                 "&field1=" + String(dhtData.temperature, 1) +
+                 "&field2=" + String(dhtData.humidity, 1) +
+                 "&field3=" + String(soilRaw) +
+                 "&field4=" + String(purityRaw);
 
-  Serial.print("Humidity: ");
-  Serial.print(hum);
-  Serial.println(" %");
-
-  Serial.print("Soil Moisture (0-4095): ");
-  Serial.println(soil);
-
-  Serial.print("Water Purity (0-4095): ");
-  Serial.println(water);
-
-  // Alert thresholds
-  bool soilDry = soil < 1500;         // adjust as needed
-  bool waterDirty = water > 3000;     // adjust as needed
-
-  // LED blinking logic
-  if (soilDry && waterDirty) {
-    Serial.println("⚠️ ALERT: Soil dry AND Water impure!");
-    digitalWrite(LED_PIN, HIGH);
-    delay(200);
-    digitalWrite(LED_PIN, LOW);
-    delay(200);
-  }
-  else if (soilDry) {
-    Serial.println("⚠️ ALERT: Soil is dry!");
-    digitalWrite(LED_PIN, HIGH);
-    delay(600);
-    digitalWrite(LED_PIN, LOW);
-    delay(600);
-  }
-  else if (waterDirty) {
-    Serial.println("⚠️ ALERT: Water is impure!");
-    digitalWrite(LED_PIN, HIGH);
-    delay(350);
-    digitalWrite(LED_PIN, LOW);
-    delay(350);
-  }
-  else {
-    Serial.println("✅ All conditions normal.");
-    digitalWrite(LED_PIN, LOW);
-    delay(1000);
+    http.begin(url);
+    int httpCode = http.GET();
+    if (httpCode > 0) {
+      Serial.println("ThingSpeak response: " + String(httpCode));
+    } else {
+      Serial.println("HTTP error: " + http.errorToString(httpCode));
+    }
+    http.end();
+  } else {
+    Serial.println("WiFi disconnected – skipping upload.");
   }
 
-  Serial.println("----------------------------------");
+  // ThingSpeak free tier: 15 s minimum interval
+  delay(15000);
 }
